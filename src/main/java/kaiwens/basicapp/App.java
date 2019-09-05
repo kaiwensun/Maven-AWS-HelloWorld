@@ -22,16 +22,14 @@ public class App
 {
     public static void main( String[] args ) {
         System.out.println( "Hello World!" );
+        examplePassSystemPropertyFromPOM();
+        exampleLog4j2Level();
 //        System.out.println(AmazonDynamoDB.ENDPOINT_PREFIX);
 //        AmazonDynamoDBClientBuilder builder = AmazonDynamoDBClientBuilder.standard();
 //        AmazonDynamoDB ddb = builder.build();
 //        Region.getRegion(Regions.US_WEST_2);
 //        ddb.shutdown();
-        Log log = LogFactory.getLog("com.amazonaws");
-        log.debug("DEBUG!");
-        log.info("INFO");
-        log.warn("WARN");
-        log.error("ERROR");
+
         AWSLambda lambda = AWSLambdaClientBuilder.defaultClient();
         ListFunctionsResult result = lambda.listFunctions();
         System.out.println("Size: " + result.getFunctions().size());
@@ -39,5 +37,16 @@ public class App
             System.out.println(config.getFunctionName());
         }
         lambda.shutdown();
+    }
+
+    private static void examplePassSystemPropertyFromPOM() {
+        System.out.println(System.getProperty("abc"));
+    }
+    private static void exampleLog4j2Level() {
+        Log log = LogFactory.getLog("com.amazonaws");
+        log.debug("DEBUG!");
+        log.info("INFO");
+        log.warn("WARN");
+        log.error("ERROR");
     }
 }

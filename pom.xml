@@ -85,11 +85,18 @@
   <build>
     <plugins>
       <plugin>
+        <!-- mvn exec:java-->
         <groupId>org.codehaus.mojo</groupId>
         <artifactId>exec-maven-plugin</artifactId>
         <version>1.6.0</version>
         <configuration>
           <mainClass>kaiwens.basicapp.App</mainClass>
+          <systemProperties>
+            <systemProperty>
+              <key>abc</key>
+              <value>1234</value>
+            </systemProperty>
+          </systemProperties>
         </configuration>
       </plugin>
     </plugins>
