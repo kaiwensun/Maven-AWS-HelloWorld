@@ -15,5 +15,8 @@
         <Logger name="org.apache.http" level="error">
             <AppenderRef ref="Console" />
         </Logger>
+        <logger name="kaiwens.basicapp.App." level="info">
+            <AppenderRef ref="console" />
+        </logger>
     </Loggers>
 </Configuration>

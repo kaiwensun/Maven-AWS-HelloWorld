@@ -1,5 +1,6 @@
 package kaiwens.basicapp;
 
+import com.amazonaws.client.builder.AwsClientBuilder;
 import com.amazonaws.services.dynamodbv2.AmazonDynamoDB;
 import com.amazonaws.services.dynamodbv2.AmazonDynamoDBClientBuilder;
 import com.amazonaws.regions.Regions;
@@ -9,19 +10,18 @@ import com.amazonaws.services.lambda.model.FunctionConfiguration;
 import com.amazonaws.services.lambda.model.ListFunctionsResult;
 import com.amazonaws.services.s3.AmazonS3;
 import com.amazonaws.services.s3.AmazonS3ClientBuilder;
-import com.amazonaws.auth.profile.ProfileCredentialsProvider;
 import com.amazonaws.services.lambda.AWSLambda;
-import com.amazonaws.services.s3.model.Bucket;
+import com.amazonaws.services.s3.model.ObjectListing;
+import lombok.extern.slf4j.Slf4j;
+import lombok.val;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 
+import java.io.File;
 import java.util.Arrays;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.stream.Collectors;
 
-import lombok.extern.slf4j.Slf4j;
 
 @Slf4j
 public class App {
@@ -34,18 +34,15 @@ public class App {
 
     public static void main(String[] args) {
         System.out.println("Hello World!");
-        log.error("THIS ERROR MESSAGE IS PRINTED BY lombok and slf4j");
-//        examplePassSystemPropertyFromPOM();
-//        exampleLog4j2Level();
+        exampleS3Operations();
 
-
-//        exampleS3Operations();
-
+//        AmazonS3Client s3 = new AmazonS3Client();
+//        s3.setRegion(RegionUtils.getRegion("us-east-2"));
 
     }
 
     /*
-     * Example static labs
+     * Example labs entry points
      */
     private static void examplePassSystemPropertyFromPOM() {
         System.out.println(System.getProperty("abc"));
@@ -62,6 +59,9 @@ public class App {
     private static void exampleS3Operations() {
         App app = new App();
         app.createBucket();
+        app.uploadObjects();
+        app.getObjects();
+        app.deleteBucket();
         app.shutdownClients();
     }
 
@@ -88,25 +88,79 @@ public class App {
      */
 
     private List<AmazonS3> createClients(List<Regions> regions) {
-        return regions.stream().map(region -> AmazonS3ClientBuilder.standard().withRegion(region).build()).collect(Collectors.toList());
+        return regions.stream().map(region -> AmazonS3ClientBuilder.standard()
+                // .withRegion(region)
+                .withEndpointConfiguration(
+                        new AwsClientBuilder.EndpointConfiguration("s3." + region.getName() + ".amazonaws.com",
+                                region.getName()))
+                .build()
+        ).collect(Collectors.toList());
     }
 
     private List<Regions> getRegions() {
         return Arrays.asList(Regions.US_EAST_1, Regions.EU_WEST_1, Regions.AP_NORTHEAST_1);
     }
 
-    private List<Bucket> createBucket() {
-        return clients.stream().map(
+    private void createBucket() {
+        clients.forEach(
                 s3 -> {
-                    String bucketName = "kaiwens-s3test-"+s3.getRegionName();
+                    String bucketName = getBucketName(s3);
                     if (s3.doesBucketExistV2(bucketName)) {
+                        log.warn("The bucket " + bucketName + " is already created.");
+                    } else {
+                        s3.createBucket(bucketName);
                     }
-                    return s3.createBucket(bucketName);
                 }
-        ).collect(Collectors.toList());
+        );
+    }
+
+    private void deleteBucket() {
+        clients.forEach(s3 -> {
+            val bucketName = getBucketName(s3);
+            boolean first = true;
+            for (ObjectListing objectListing = s3.listObjects(bucketName);
+                 objectListing.isTruncated() || first;
+                 objectListing = s3.listNextBatchOfObjects(objectListing)) {
+                first = false;
+                objectListing.getObjectSummaries().forEach(
+                        s3ObjectSummary -> s3.deleteObject(bucketName, s3ObjectSummary.getKey())
+                );
+            }
+            s3.deleteBucket(bucketName);
+        });
+    }
+
+    private String getBucketName(AmazonS3 client) {
+        return "kaiwens-s3test-" + client.getRegionName();
+    }
+
+    private void uploadObjects() {
+        val localPath = "/Users/kaiwens/workplace/test/";
+        clients.forEach(
+                s3 -> {
+                    val bucketName = getBucketName(s3);
+                    val objectName = "out.txt";
+                    val file = new File(localPath + objectName);
+                    if (s3.doesObjectExist(bucketName, objectName)) {
+                        log.warn("Object exists: " + bucketName + "/" + objectName);
+                    } else {
+                        s3.putObject(bucketName, objectName, file);
+                    }
+                }
+        );
+    }
+
+    private void getObjects() {
+        clients.forEach(s3 -> {
+            val bucketName = getBucketName(s3);
+            val objectName = "out.txt";
+            String objectString = s3.getObjectAsString(bucketName, objectName);
+            System.out.println("Got from " + bucketName + ": " + objectString);
+        });
     }
 
     private void shutdownClients() {
         clients.forEach(client -> client.shutdown());
     }
+
 }
