@@ -16,7 +16,7 @@
             <AppenderRef ref="Console" />
         </Logger>
         <logger name="kaiwens.basicapp.App." level="info">
-            <AppenderRef ref="console" />
+            <AppenderRef ref="Console" />
         </logger>
     </Loggers>
 </Configuration>
