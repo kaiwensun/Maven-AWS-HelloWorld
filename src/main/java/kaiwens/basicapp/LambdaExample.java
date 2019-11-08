@@ -1,18 +1,37 @@
 package kaiwens.basicapp;
 
+import com.amazonaws.regions.Regions;
 import com.amazonaws.services.lambda.AWSLambda;
 import com.amazonaws.services.lambda.AWSLambdaClientBuilder;
+import com.amazonaws.services.lambda.model.AliasRoutingConfiguration;
 import com.amazonaws.services.lambda.model.FunctionConfiguration;
 import com.amazonaws.services.lambda.model.ListFunctionsResult;
+import com.amazonaws.services.lambda.model.UpdateAliasRequest;
+
+import java.util.HashMap;
+import java.util.Map;
 
 public class LambdaExample {
-    private static void exampleLambdaOperations() {
-        AWSLambda lambda = AWSLambdaClientBuilder.defaultClient();
+    public static void main() {
+        AWSLambda lambda = AWSLambdaClientBuilder.standard().withRegion(Regions.SA_EAST_1).build();
         ListFunctionsResult result = lambda.listFunctions();
         System.out.println("Size: " + result.getFunctions().size());
         for (FunctionConfiguration config : result.getFunctions()) {
             System.out.println(config.getFunctionName());
         }
+        String funcName = "goodboy";
+        String alias = "PROD";
+        Map<String, Double> map = new HashMap<>();
+        map.put("2", 0.0);
+        AliasRoutingConfiguration routingConfig =
+                new AliasRoutingConfiguration().withAdditionalVersionWeights(map);
+        UpdateAliasRequest request =
+                new UpdateAliasRequest()
+                        .withFunctionName(funcName)
+                        .withFunctionVersion("1")
+                        .withName(alias)
+                        .withRoutingConfig(routingConfig);
+        lambda.updateAlias(request);
         lambda.shutdown();
     }
 }
