@@ -2,14 +2,9 @@ package kaiwens.basicapp;
 
 import com.amazonaws.services.codedeploy.AmazonCodeDeploy;
 import com.amazonaws.services.codedeploy.AmazonCodeDeployClientBuilder;
-import com.amazonaws.services.codedeploy.model.CreateDeploymentRequest;
-import com.amazonaws.services.codedeploy.model.RawString;
-import com.amazonaws.services.codedeploy.model.RevisionLocation;
-import com.amazonaws.services.codedeploy.model.RevisionLocationType;
 import com.amazonaws.services.ec2.AmazonEC2;
 import com.amazonaws.services.ec2.AmazonEC2ClientBuilder;
 import com.amazonaws.services.ec2.model.AssociateRouteTableRequest;
-import com.amazonaws.services.ec2.model.CreateSecurityGroupRequest;
 import com.amazonaws.services.ec2.model.DescribeInternetGatewaysRequest;
 import com.amazonaws.services.ec2.model.DescribeRouteTablesRequest;
 import com.amazonaws.services.ec2.model.DescribeSecurityGroupsRequest;
@@ -23,11 +18,21 @@ import com.amazonaws.services.ec2.model.Subnet;
 import com.amazonaws.services.ec2.model.Vpc;
 import com.amazonaws.services.ecs.AmazonECS;
 import com.amazonaws.services.ecs.AmazonECSClientBuilder;
+import com.amazonaws.services.elasticloadbalancingv2.AmazonElasticLoadBalancing;
+import com.amazonaws.services.elasticloadbalancingv2.AmazonElasticLoadBalancingAsyncClientBuilder;
+import com.amazonaws.services.elasticloadbalancingv2.model.CreateLoadBalancerRequest;
+import com.amazonaws.services.elasticloadbalancingv2.model.DescribeLoadBalancersRequest;
+import com.amazonaws.services.elasticloadbalancingv2.model.LoadBalancer;
+import com.amazonaws.services.elasticloadbalancingv2.model.LoadBalancerNotFoundException;
+import com.amazonaws.services.elasticloadbalancingv2.model.LoadBalancerStateEnum;
+import com.amazonaws.services.elasticloadbalancingv2.model.LoadBalancerTypeEnum;
+import lombok.extern.slf4j.Slf4j;
 
 import java.util.Arrays;
 import java.util.List;
 import java.util.stream.Collectors;
 
+@Slf4j
 public class CodeDeployECS {
 
 //    https://docs.aws.amazon.com/codedeploy/latest/userguide/deployment-groups-create-load-balancer-for-ecs.html
@@ -35,8 +40,10 @@ public class CodeDeployECS {
     private final AmazonCodeDeploy codeDeploy;
     private final AmazonEC2 ec2;
     private final AmazonECS ecs;
+    private final AmazonElasticLoadBalancing elb;
 
     private final static List<String> AZs = Arrays.asList("us-west-2a", "us-west-2b");
+    private final static String ALB_NAME = "ecs-dep-alb";
 
 
     public static void main() {
@@ -49,27 +56,50 @@ public class CodeDeployECS {
     }
 
     private void work() {
+
+        // Verify Your Default VPC, Public Subnets, and Security Group
         Vpc vpc = getDefaultVpc();
         List<Subnet> subnets = getSubnets(vpc.getVpcId());
-
-        printResource("vpc", vpc);
-
         SecurityGroup sg = getDefaultSecurityGroup(vpc);
-        printResource("security group", sg);
 
-        printResource("subnets", subnets);
+        // Ceate an Amazon EC2 Application Load Balancer, Two Target Groups, and Listeners
+        getOrCreateLoadBalancer(subnets, sg);
     }
+
+    private LoadBalancer getOrCreateLoadBalancer(List<Subnet> subnets, SecurityGroup sg) {
+        List<LoadBalancer> lbs;
+        try {
+            lbs = elb.describeLoadBalancers(new DescribeLoadBalancersRequest().withNames(ALB_NAME)).getLoadBalancers();
+            assert (lbs.size() == 1);
+        } catch (LoadBalancerNotFoundException e) {
+            log.info("Creating new load balancer");
+            lbs = elb.createLoadBalancer(new CreateLoadBalancerRequest()
+                    .withName(ALB_NAME)
+                    .withSubnets(subnets.stream().map(Subnet::getSubnetId).collect(Collectors.toList()))
+                    .withType(LoadBalancerTypeEnum.Application) // this is default
+                    .withSecurityGroups(sg.getGroupId()))
+                    .getLoadBalancers();
+        }
+        LoadBalancer lb = lbs.get(0);
+        printResource("load balancer", lb);
+        assert (lb.getType().equals(LoadBalancerTypeEnum.Application.toString()));
+        assert (lb.getState().getCode().equals(LoadBalancerStateEnum.Active.toString()));
+        return lb;
+    }
+
 
     private CodeDeployECS() {
         codeDeploy = AmazonCodeDeployClientBuilder.defaultClient();
         ec2 = AmazonEC2ClientBuilder.defaultClient();
         ecs = AmazonECSClientBuilder.defaultClient();
+        elb = AmazonElasticLoadBalancingAsyncClientBuilder.defaultClient();
     }
 
     private void deconstruct() {
         codeDeploy.shutdown();
         ec2.shutdown();
         ecs.shutdown();
+        elb.shutdown();
     }
 
     private SecurityGroup getDefaultSecurityGroup(Vpc vpc) {
@@ -94,7 +124,7 @@ public class CodeDeployECS {
                     ).getSubnets();
                     assert (subnets.size() == 1);
                     Subnet subnet = subnets.get(0);
-                    makesureSubnetPublic(subnet, routeTable);
+                    makeSureSubnetPublic(subnet, routeTable);
                     return subnet;
                 }
         ).collect(Collectors.toList());
@@ -114,12 +144,13 @@ public class CodeDeployECS {
         return routeTable;
     }
 
-    private void makesureSubnetPublic(Subnet subnet, RouteTable routeTable) {
+    private void makeSureSubnetPublic(Subnet subnet, RouteTable routeTable) {
         int association = (int) (routeTable.getAssociations().stream().filter(
                 routeTableAssociation -> subnet.getSubnetId().equals(routeTableAssociation.getSubnetId())
         ).count());
-        assert(association <= 1);
+        assert (association <= 1);
         if (association == 0) {
+            log.info("associating route table");
             ec2.associateRouteTable(new AssociateRouteTableRequest().withSubnetId(subnet.getSubnetId()).withRouteTableId(routeTable.getRouteTableId()));
         }
     }
