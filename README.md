@@ -3,6 +3,5 @@
 ### Run the main program
 
 ```
-mvn clean && mvn package && mvn exec:java
+./run.sh
 ```
-exec:java goal is supported by the `exec-maven-plugin` plugin.
