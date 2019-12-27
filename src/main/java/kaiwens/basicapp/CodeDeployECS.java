@@ -26,15 +26,25 @@ import com.amazonaws.services.ec2.model.Subnet;
 import com.amazonaws.services.ec2.model.Vpc;
 import com.amazonaws.services.ecs.AmazonECS;
 import com.amazonaws.services.ecs.AmazonECSClientBuilder;
+import com.amazonaws.services.ecs.model.AssignPublicIp;
+import com.amazonaws.services.ecs.model.AwsVpcConfiguration;
 import com.amazonaws.services.ecs.model.Cluster;
 import com.amazonaws.services.ecs.model.Compatibility;
 import com.amazonaws.services.ecs.model.ContainerDefinition;
 import com.amazonaws.services.ecs.model.CreateClusterRequest;
+import com.amazonaws.services.ecs.model.CreateServiceRequest;
+import com.amazonaws.services.ecs.model.DeploymentController;
+import com.amazonaws.services.ecs.model.DeploymentControllerType;
 import com.amazonaws.services.ecs.model.DescribeClustersRequest;
+import com.amazonaws.services.ecs.model.DescribeServicesRequest;
+import com.amazonaws.services.ecs.model.LaunchType;
 import com.amazonaws.services.ecs.model.ListTaskDefinitionsRequest;
+import com.amazonaws.services.ecs.model.NetworkConfiguration;
 import com.amazonaws.services.ecs.model.NetworkMode;
 import com.amazonaws.services.ecs.model.PortMapping;
 import com.amazonaws.services.ecs.model.RegisterTaskDefinitionRequest;
+import com.amazonaws.services.ecs.model.SchedulingStrategy;
+import com.amazonaws.services.ecs.model.Service;
 import com.amazonaws.services.ecs.model.TransportProtocol;
 import com.amazonaws.services.elasticloadbalancingv2.AmazonElasticLoadBalancing;
 import com.amazonaws.services.elasticloadbalancingv2.AmazonElasticLoadBalancingClientBuilder;
@@ -102,8 +112,16 @@ public class CodeDeployECS {
     private final static String ECS_TASKEXECUTION_POLICY_ARN =
             "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy";
     private final static String ECS_TASKEXECUTION_ROLE_TRUSTED_IDENTITY = "ecs-tasks.amazonaws.com";
+    private final static String ECS_CONTAINER_NAME = "container-stored-in-ecr";
 
     private final static String TASK_DEFINITION_FAMILY_NAME = "manager-websites";
+    private final static String ECS_SERVICE_NAME = "ecs-service";
+
+    private LoadBalancer lb;
+    private List<Subnet> subnets;
+    private SecurityGroup sg;
+    private TargetGroup blueTg;
+    private TargetGroup greenTg;
 
 
     public static void main() {
@@ -127,7 +145,48 @@ public class CodeDeployECS {
         // https://docs.aws.amazon.com/AmazonECS/latest/developerguide/create-blue-green.html step 2, 3 and 4
         Cluster cluster = getOrCreateEcsCluster();
         List<String> taskDefinitionArns = getOrCreateTaskDefinitions();
+        getOrCreateEcsService(taskDefinitionArns.get(0), this.lb, this.sg, this.subnets, this.blueTg);
 
+    }
+
+    private Service getOrCreateEcsService(final String taskDefinitionArn, LoadBalancer lb, SecurityGroup sg,
+                                          List<Subnet> subnets, TargetGroup blueTg) {
+        List<Service> services = ecs.describeServices(new DescribeServicesRequest()
+                .withCluster(ECS_CLUSTER_NAME)
+                .withServices(ECS_SERVICE_NAME)
+        ).getServices();
+        assert (services.size() <= 1);
+        Service service;
+        if (services.size() == 0) {
+            log.info("Creating ECS service");
+            service = ecs.createService(new CreateServiceRequest()
+                    .withServiceName(ECS_SERVICE_NAME)
+                    .withCluster(ECS_CLUSTER_NAME)
+                    .withTaskDefinition(taskDefinitionArn)
+                    .withLoadBalancers(new com.amazonaws.services.ecs.model.LoadBalancer()
+                            // either lb name or tg arn can be specified at the same time
+                            // .withLoadBalancerName(lb.getLoadBalancerName())
+                            .withContainerName(ECS_CONTAINER_NAME)
+                            .withContainerPort(80)
+                            .withTargetGroupArn(blueTg.getTargetGroupArn())
+                    )
+                    .withLaunchType(LaunchType.FARGATE)
+                    .withSchedulingStrategy(SchedulingStrategy.REPLICA)
+                    .withDeploymentController(new DeploymentController()
+                            .withType(DeploymentControllerType.CODE_DEPLOY))
+                    .withPlatformVersion("LATEST")
+                    .withNetworkConfiguration(new NetworkConfiguration()
+                            .withAwsvpcConfiguration(new AwsVpcConfiguration()
+                                    .withAssignPublicIp(AssignPublicIp.ENABLED)
+                                    .withSecurityGroups(sg.getGroupId())
+                                    .withSubnets(subnets.stream().map(Subnet::getSubnetId).collect(Collectors.toList()))))
+                    .withDesiredCount(3)
+            ).getService();
+        } else {
+            service = services.get(0);
+        }
+        printResource("service", service);
+        return service;
     }
 
     private Cluster getOrCreateEcsCluster() {
@@ -146,17 +205,13 @@ public class CodeDeployECS {
         return cluster;
     }
 
-    private void getOrCreateEcsTaskExecutionRole() {
-
-    }
-
     private List<String> getOrCreateTaskDefinitions() {
         Role role = getOrCreateServiceRole(ECS_TASKEXECUTION_ROLE_NAME, ECS_TASKEXECUTION_POLICY_ARN, ECS_TASKEXECUTION_ROLE_TRUSTED_IDENTITY);
         List<String> taskDefinitionArns = ecs.listTaskDefinitions(new ListTaskDefinitionsRequest()
                 .withFamilyPrefix(TASK_DEFINITION_FAMILY_NAME)
         ).getTaskDefinitionArns();
         if (taskDefinitionArns.size() != 0) {
-            for (int revision : new int[] {1, 2}) {
+            for (int revision : new int[]{1, 2}) {
                 String taskDefinitionRevision = TASK_DEFINITION_FAMILY_NAME + ":" + revision;
                 if (!taskDefinitionArns.stream().anyMatch(arn -> arn.endsWith("/" + taskDefinitionRevision))) {
                     throw new AssertionError("Can't find task definition " + taskDefinitionRevision +
@@ -166,13 +221,13 @@ public class CodeDeployECS {
             }
         } else {
             log.info("creating new task definitions");
-            for (int revision : new int[] {1, 2}) {
+            for (int revision : new int[]{1, 2}) {
                 ecs.registerTaskDefinition(new RegisterTaskDefinitionRequest()
                         .withFamily(TASK_DEFINITION_FAMILY_NAME)
                         .withNetworkMode(NetworkMode.Awsvpc)
                         .withContainerDefinitions(Arrays.asList(80, 8080).stream().map(port ->
                                 new ContainerDefinition()
-                                        .withName("sample-app")
+                                        .withName(ECS_CONTAINER_NAME)
                                         .withImage("httpd:2.4")
                                         .withEssential(true)
                                         .withEntryPoint("sh", "-c")
@@ -191,7 +246,7 @@ public class CodeDeployECS {
             taskDefinitionArns = ecs.listTaskDefinitions(new ListTaskDefinitionsRequest()
                     .withFamilyPrefix(TASK_DEFINITION_FAMILY_NAME)).getTaskDefinitionArns();
         }
-        assert(taskDefinitionArns.size() == 2);
+        assert (taskDefinitionArns.size() == 2);
         return taskDefinitionArns;
     }
 
@@ -299,6 +354,11 @@ public class CodeDeployECS {
         TargetGroup greenTg = getOrCreateTargetGroup(GREEN_TG_NAME, vpc.getVpcId());
         getOrCreateListener(lb, blueTg, 80);
         getOrCreateListener(lb, greenTg, 8080);
+
+        this.subnets = subnets;
+        this.sg = sg;
+        this.blueTg = blueTg;
+        this.greenTg = greenTg;
     }
 
     private Listener getOrCreateListener(LoadBalancer lb, TargetGroup tg, Integer port) {
@@ -364,8 +424,7 @@ public class CodeDeployECS {
                     .withSecurityGroups(sg.getGroupId())
                     .withScheme(LoadBalancerSchemeEnum.InternetFacing)
                     .withIpAddressType(IpAddressType.Ipv4)
-            )
-                    .getLoadBalancers();
+            ).getLoadBalancers();
         }
         LoadBalancer lb = lbs.get(0);
         assert (lb.getType().equals(LoadBalancerTypeEnum.Application.toString()));
@@ -377,6 +436,7 @@ public class CodeDeployECS {
                 null,
                 null
         );
+        this.lb = lb;
         return lb;
     }
 
