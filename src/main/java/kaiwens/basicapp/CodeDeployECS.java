@@ -2,14 +2,37 @@ package kaiwens.basicapp;
 
 import com.amazonaws.services.codedeploy.AmazonCodeDeploy;
 import com.amazonaws.services.codedeploy.AmazonCodeDeployClientBuilder;
+import com.amazonaws.services.codedeploy.model.AppSpecContent;
 import com.amazonaws.services.codedeploy.model.ApplicationDoesNotExistException;
-import com.amazonaws.services.codedeploy.model.ApplicationInfo;
+import com.amazonaws.services.codedeploy.model.AutoRollbackConfiguration;
+import com.amazonaws.services.codedeploy.model.AutoRollbackEvent;
+import com.amazonaws.services.codedeploy.model.BlueGreenDeploymentConfiguration;
+import com.amazonaws.services.codedeploy.model.BlueInstanceTerminationOption;
 import com.amazonaws.services.codedeploy.model.ComputePlatform;
 import com.amazonaws.services.codedeploy.model.CreateApplicationRequest;
 import com.amazonaws.services.codedeploy.model.CreateDeploymentGroupRequest;
+import com.amazonaws.services.codedeploy.model.CreateDeploymentRequest;
 import com.amazonaws.services.codedeploy.model.DeploymentGroupDoesNotExistException;
+import com.amazonaws.services.codedeploy.model.DeploymentOption;
+import com.amazonaws.services.codedeploy.model.DeploymentReadyAction;
+import com.amazonaws.services.codedeploy.model.DeploymentReadyOption;
+import com.amazonaws.services.codedeploy.model.DeploymentStatus;
+import com.amazonaws.services.codedeploy.model.DeploymentStyle;
+import com.amazonaws.services.codedeploy.model.DeploymentTarget;
+import com.amazonaws.services.codedeploy.model.DeploymentType;
+import com.amazonaws.services.codedeploy.model.ECSService;
 import com.amazonaws.services.codedeploy.model.GetApplicationRequest;
 import com.amazonaws.services.codedeploy.model.GetDeploymentGroupRequest;
+import com.amazonaws.services.codedeploy.model.GetDeploymentRequest;
+import com.amazonaws.services.codedeploy.model.GetDeploymentTargetRequest;
+import com.amazonaws.services.codedeploy.model.InstanceAction;
+import com.amazonaws.services.codedeploy.model.LoadBalancerInfo;
+import com.amazonaws.services.codedeploy.model.RevisionLocation;
+import com.amazonaws.services.codedeploy.model.RevisionLocationType;
+import com.amazonaws.services.codedeploy.model.TargetGroupInfo;
+import com.amazonaws.services.codedeploy.model.TargetGroupPairInfo;
+import com.amazonaws.services.codedeploy.model.TargetStatus;
+import com.amazonaws.services.codedeploy.model.TrafficRoute;
 import com.amazonaws.services.ec2.AmazonEC2;
 import com.amazonaws.services.ec2.AmazonEC2ClientBuilder;
 import com.amazonaws.services.ec2.model.AssociateRouteTableRequest;
@@ -45,6 +68,7 @@ import com.amazonaws.services.ecs.model.PortMapping;
 import com.amazonaws.services.ecs.model.RegisterTaskDefinitionRequest;
 import com.amazonaws.services.ecs.model.SchedulingStrategy;
 import com.amazonaws.services.ecs.model.Service;
+import com.amazonaws.services.ecs.model.TaskDefinition;
 import com.amazonaws.services.ecs.model.TransportProtocol;
 import com.amazonaws.services.elasticloadbalancingv2.AmazonElasticLoadBalancing;
 import com.amazonaws.services.elasticloadbalancingv2.AmazonElasticLoadBalancingClientBuilder;
@@ -86,6 +110,7 @@ import lombok.extern.slf4j.Slf4j;
 import java.util.Arrays;
 import java.util.List;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 @Slf4j
 public class CodeDeployECS {
@@ -102,7 +127,7 @@ public class CodeDeployECS {
     private final static String GREEN_TG_NAME = "green-tg";
 
     private final static String APP_NAME = "ecs-application";
-    private final static String DEPLOYMENT_GROUP_GROUP = "ecs-dep-group";
+    private final static String DEPLOYMENT_GROUP_NAME = "ecs-dep-group";
     private final static String CD_SERVICE_ROLE_NAME = "CodeDeployServiceRoleForECS";
     private final static String CD_SERVICE_POLICY_ARN = "arn:aws:iam::aws:policy/AWSCodeDeployRoleForECS";
     private final static String CD_SERVICE_ROLE_TRUSTED_IDENTITY = "codedeploy.amazonaws.com";
@@ -116,17 +141,26 @@ public class CodeDeployECS {
 
     private final static String TASK_DEFINITION_FAMILY_NAME = "manager-websites";
     private final static String ECS_SERVICE_NAME = "ecs-service";
+    private final static Integer DESIRED_ECS_TASK_COUNT = 3;
+
+    private List<Integer> taskDefinitionRevision = Arrays.asList(1, 2);
 
     private LoadBalancer lb;
     private List<Subnet> subnets;
     private SecurityGroup sg;
     private TargetGroup blueTg;
     private TargetGroup greenTg;
+    private Listener prodListener;
+    private Listener testListener;
+    private Cluster ecsCluster;
+    private Service ecsService;
+    private List<String> taskDefinitionArns;
 
 
     public static void main() {
         CodeDeployECS example = new CodeDeployECS();
         try {
+            example.setupDeployDirection();
             example.work();
         } finally {
             example.deconstruct();
@@ -140,13 +174,28 @@ public class CodeDeployECS {
         prepareForDeployment();
     }
 
+    private void setupDeployDirection() {
+        Stream<Service> services = ecs.describeServices(new DescribeServicesRequest()
+                .withServices(ECS_SERVICE_NAME)
+                .withCluster(ECS_CLUSTER_NAME)
+        ).getServices().stream().filter(
+                service -> service.getTaskDefinition().startsWith(TASK_DEFINITION_FAMILY_NAME + ":" + 2)
+        );
+        if (services.count() != 0) {
+            this.taskDefinitionRevision = Arrays.asList(2, 1);
+        }
+    }
+
     private void setupEcsResources() {
         // Fargate for now
         // https://docs.aws.amazon.com/AmazonECS/latest/developerguide/create-blue-green.html step 2, 3 and 4
         Cluster cluster = getOrCreateEcsCluster();
         List<String> taskDefinitionArns = getOrCreateTaskDefinitions();
-        getOrCreateEcsService(taskDefinitionArns.get(0), this.lb, this.sg, this.subnets, this.blueTg);
+        Service service = getOrCreateEcsService(taskDefinitionArns.get(0), this.lb, this.sg, this.subnets, this.blueTg);
 
+        this.ecsCluster = cluster;
+        this.ecsService = service;
+        this.taskDefinitionArns = taskDefinitionArns;
     }
 
     private Service getOrCreateEcsService(final String taskDefinitionArn, LoadBalancer lb, SecurityGroup sg,
@@ -180,13 +229,29 @@ public class CodeDeployECS {
                                     .withAssignPublicIp(AssignPublicIp.ENABLED)
                                     .withSecurityGroups(sg.getGroupId())
                                     .withSubnets(subnets.stream().map(Subnet::getSubnetId).collect(Collectors.toList()))))
-                    .withDesiredCount(3)
+                    .withDesiredCount(DESIRED_ECS_TASK_COUNT)
             ).getService();
         } else {
             service = services.get(0);
         }
-        printResource("service", service);
+        Utils.eventually(() -> {
+            verifyEcsTasksAreRunning();
+            return null;
+        }, null, null);
         return service;
+    }
+
+    private void verifyEcsTasksAreRunning() {
+        List<Service> services = ecs.describeServices(new DescribeServicesRequest()
+                .withCluster(ECS_CLUSTER_NAME)
+                .withServices(ECS_SERVICE_NAME)
+        ).getServices();
+        assert (services.size() == 1);
+        Service service = services.get(0);
+        if (!service.getTaskSets().stream().allMatch(
+                taskSet -> taskSet.getComputedDesiredCount().equals(taskSet.getRunningCount()))) {
+            throw new AssertionError("ECS tasks are not ready: " + service.getTaskSets());
+        }
     }
 
     private Cluster getOrCreateEcsCluster() {
@@ -196,6 +261,7 @@ public class CodeDeployECS {
         Cluster cluster;
         assert (clusters.size() <= 1);
         if (clusters.size() == 0) {
+            log.info("Creating new ECS cluster");
             cluster = ecs.createCluster(new CreateClusterRequest()
                     .withClusterName(ECS_CLUSTER_NAME)
             ).getCluster();
@@ -211,7 +277,7 @@ public class CodeDeployECS {
                 .withFamilyPrefix(TASK_DEFINITION_FAMILY_NAME)
         ).getTaskDefinitionArns();
         if (taskDefinitionArns.size() != 0) {
-            for (int revision : new int[]{1, 2}) {
+            for (int revision : taskDefinitionRevision) {
                 String taskDefinitionRevision = TASK_DEFINITION_FAMILY_NAME + ":" + revision;
                 if (!taskDefinitionArns.stream().anyMatch(arn -> arn.endsWith("/" + taskDefinitionRevision))) {
                     throw new AssertionError("Can't find task definition " + taskDefinitionRevision +
@@ -221,7 +287,7 @@ public class CodeDeployECS {
             }
         } else {
             log.info("creating new task definitions");
-            for (int revision : new int[]{1, 2}) {
+            for (int revision : taskDefinitionRevision) {
                 ecs.registerTaskDefinition(new RegisterTaskDefinitionRequest()
                         .withFamily(TASK_DEFINITION_FAMILY_NAME)
                         .withNetworkMode(NetworkMode.Awsvpc)
@@ -301,10 +367,61 @@ public class CodeDeployECS {
                 CD_SERVICE_ROLE_NAME, CD_SERVICE_POLICY_ARN, CD_SERVICE_ROLE_TRUSTED_IDENTITY);
 
         // https://docs.aws.amazon.com/codedeploy/latest/userguide/applications-create-cli.html
-
-//        createApplication();
+        String applicationId = createApplication();
+        String deploymentGroupId = createDeploymentGroup(this.blueTg, this.greenTg, this.prodListener,
+                this.testListener, role, this.ecsCluster, this.ecsService);
+        String deploymentId = createDeployment();
+        printResource("Deployment ID", deploymentId);
+        monitorDeploymentProgress(deploymentId);
     }
-    /*
+
+    private String createDeployment() {
+        return codedeploy.createDeployment(new CreateDeploymentRequest()
+                .withApplicationName(APP_NAME)
+                .withDeploymentGroupName(DEPLOYMENT_GROUP_NAME)
+                .withRevision(new RevisionLocation()
+                        .withRevisionType(RevisionLocationType.AppSpecContent)
+                        .withAppSpecContent(new AppSpecContent()
+                                .withContent(getAppSpecContent(this.taskDefinitionArns.get(1), ECS_CONTAINER_NAME))))
+        ).getDeploymentId();
+    }
+
+    private void monitorDeploymentProgress(String deploymentId) {
+        Utils.eventually(() -> {
+            String deploymentStatus = codedeploy.getDeployment(new GetDeploymentRequest()
+                    .withDeploymentId(deploymentId)
+            ).getDeploymentInfo().getStatus();
+            printResource("Deployment Status", deploymentStatus);
+            assert (DeploymentStatus.fromValue(deploymentStatus).equals(DeploymentStatus.InProgress));
+            return deploymentStatus;
+        }, null, null);
+
+        TargetStatus targetStatus = Utils.eventually(() -> {
+            DeploymentTarget deploymentTarget = codedeploy.getDeploymentTarget(new GetDeploymentTargetRequest()
+                    .withDeploymentId(deploymentId)
+                    .withTargetId(APP_NAME + ":" + ECS_SERVICE_NAME)
+            ).getDeploymentTarget();
+            TargetStatus status = TargetStatus.fromValue(deploymentTarget.getEcsTarget().getStatus());
+            printResource("Target Status", status);
+            assert (TargetStatus.InProgress.equals(status));
+            return status;
+        }, null, null);
+        printResource("Target Status", targetStatus);
+    }
+
+    private String getAppSpecContent(String taskDefinitionArn, final String containerName) {
+        return "version: 0.0\n" +
+                "Resources:\n" +
+                "  - TargetService:\n" +
+                "      Type: AWS::ECS::Service\n" +
+                "      Properties:\n" +
+                "        TaskDefinition: \"" + taskDefinitionArn + "\"\n" +
+                "        LoadBalancerInfo:\n" +
+                "          ContainerName: \"" + containerName + "\"\n" +
+                "          ContainerPort: 80\n" +
+                "        PlatformVersion: \"LATEST\"";
+    }
+
 
     private String createApplication() {
         String applicationId;
@@ -322,23 +439,50 @@ public class CodeDeployECS {
         return applicationId;
     }
 
-    private String createDeploymentGroup() {
+    private String createDeploymentGroup(TargetGroup blueTg, TargetGroup greenTg, Listener prodListener,
+                                         Listener testListener, Role serviceRole, Cluster ecsCluster,
+                                         Service ecsService) {
         String deploymentGroupId;
         try {
             deploymentGroupId = codedeploy.getDeploymentGroup(new GetDeploymentGroupRequest()
                     .withApplicationName(APP_NAME)
-                    .withDeploymentGroupName(DEPLOYMENT_GROUP_GROUP)
+                    .withDeploymentGroupName(DEPLOYMENT_GROUP_NAME)
             ).getDeploymentGroupInfo().getDeploymentGroupId();
         } catch (DeploymentGroupDoesNotExistException e) {
+            log.info("Creating deployment group");
             deploymentGroupId = codedeploy.createDeploymentGroup(new CreateDeploymentGroupRequest()
                     .withApplicationName(APP_NAME)
-                    .withDeploymentGroupName(DEPLOYMENT_GROUP_GROUP)
-
+                    .withDeploymentGroupName(DEPLOYMENT_GROUP_NAME)
+                    .withAutoRollbackConfiguration(new AutoRollbackConfiguration()
+                            .withEnabled(true)
+                            .withEvents(AutoRollbackEvent.DEPLOYMENT_FAILURE))
+                    .withBlueGreenDeploymentConfiguration(new BlueGreenDeploymentConfiguration()
+                            .withDeploymentReadyOption(new DeploymentReadyOption()
+                                    .withActionOnTimeout(DeploymentReadyAction.CONTINUE_DEPLOYMENT))
+                            .withTerminateBlueInstancesOnDeploymentSuccess(new BlueInstanceTerminationOption()
+                                    .withAction(InstanceAction.TERMINATE)
+                                    .withTerminationWaitTimeInMinutes(2)))
+                    .withDeploymentStyle(new DeploymentStyle()
+                            .withDeploymentOption(DeploymentOption.WITH_TRAFFIC_CONTROL)
+                            .withDeploymentType(DeploymentType.BLUE_GREEN))
+                    .withLoadBalancerInfo(new LoadBalancerInfo()
+                            .withTargetGroupPairInfoList(new TargetGroupPairInfo()
+                                    .withTargetGroups(
+                                            new TargetGroupInfo().withName(blueTg.getTargetGroupName()),
+                                            new TargetGroupInfo().withName(greenTg.getTargetGroupName()))
+                                    .withProdTrafficRoute(new TrafficRoute()
+                                            .withListenerArns(prodListener.getListenerArn()))
+                                    .withTestTrafficRoute(new TrafficRoute()
+                                            .withListenerArns(testListener.getListenerArn()))))
+                    .withServiceRoleArn(serviceRole.getArn())
+                    .withEcsServices(new ECSService()
+                            .withClusterName(ecsCluster.getClusterName())
+                            .withServiceName(ecsService.getServiceName())
+                    )
             ).getDeploymentGroupId();
         }
+        return deploymentGroupId;
     }
-
-     */
 
     private void setupNetworkResources() {
         // https://docs.aws.amazon.com/codedeploy/latest/userguide/deployment-groups-create-load-balancer-for-ecs.html
@@ -350,15 +494,19 @@ public class CodeDeployECS {
 
         // Ceate an Amazon EC2 Application Load Balancer, Two Target Groups, and Listeners
         LoadBalancer lb = getOrCreateLoadBalancer(subnets, sg);
-        TargetGroup blueTg = getOrCreateTargetGroup(BLUE_TG_NAME, vpc.getVpcId());
-        TargetGroup greenTg = getOrCreateTargetGroup(GREEN_TG_NAME, vpc.getVpcId());
-        getOrCreateListener(lb, blueTg, 80);
-        getOrCreateListener(lb, greenTg, 8080);
+        String blue_tg_name = taskDefinitionRevision.get(0).equals(1) ? BLUE_TG_NAME : GREEN_TG_NAME;
+        String green_tg_name = taskDefinitionRevision.get(1).equals(1) ? BLUE_TG_NAME : GREEN_TG_NAME;
+        TargetGroup blueTg = getOrCreateTargetGroup(blue_tg_name, vpc.getVpcId());
+        TargetGroup greenTg = getOrCreateTargetGroup(green_tg_name, vpc.getVpcId());
+        Listener prodListener = getOrCreateListener(lb, blueTg, 80);
+        Listener testListener = getOrCreateListener(lb, greenTg, 8080);
 
         this.subnets = subnets;
         this.sg = sg;
         this.blueTg = blueTg;
         this.greenTg = greenTg;
+        this.prodListener = prodListener;
+        this.testListener = testListener;
     }
 
     private Listener getOrCreateListener(LoadBalancer lb, TargetGroup tg, Integer port) {
