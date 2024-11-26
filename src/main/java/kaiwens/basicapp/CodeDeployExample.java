@@ -1,15 +1,36 @@
 package kaiwens.basicapp;
 
+import com.amazonaws.AmazonWebServiceRequest;
+import com.amazonaws.SDKGlobalConfiguration;
+import com.amazonaws.client.builder.AwsClientBuilder;
+import com.amazonaws.handlers.RequestHandler2;
 import com.amazonaws.services.codedeploy.AmazonCodeDeploy;
 import com.amazonaws.services.codedeploy.AmazonCodeDeployClientBuilder;
 import com.amazonaws.services.codedeploy.model.CreateDeploymentRequest;
+import com.amazonaws.services.codedeploy.model.ListApplicationsRequest;
 import com.amazonaws.services.codedeploy.model.RawString;
 import com.amazonaws.services.codedeploy.model.RevisionLocation;
 import com.amazonaws.services.codedeploy.model.RevisionLocationType;
 
+import java.util.UUID;
+
 public class CodeDeployExample {
-    public static void exampleCodeDeploy() {
-        AmazonCodeDeploy codeDeploy = AmazonCodeDeployClientBuilder.standard().build();
+    public static void main() {
+        System.setProperty(SDKGlobalConfiguration.DISABLE_CERT_CHECKING_SYSTEM_PROPERTY, "true");
+        AmazonCodeDeploy codeDeploy = AmazonCodeDeployClientBuilder.standard()
+                .withEndpointConfiguration(new AwsClientBuilder.EndpointConfiguration("https://razorbill.integ.amazon.com", "us-east-1"))
+                .withRequestHandlers(new RequestHandler2() {
+                    @Override
+                    public AmazonWebServiceRequest beforeExecution(AmazonWebServiceRequest request) {
+                        StringBuilder sb = new StringBuilder();
+                        for (int i = 0; i < 1000; i++) {
+                            sb.append(String.format("%04d_", i));
+                        }
+                       request.putCustomRequestHeader("x-amzn-requestid", "kaiwens-random-" + UUID.randomUUID().toString() + sb.toString());
+                        return super.beforeExecution(request);
+                    }
+                })
+                .build();
 
         RevisionLocation revisionLocation = new RevisionLocation()
                 .withRevisionType(RevisionLocationType.String)
@@ -37,12 +58,15 @@ public class CodeDeployExample {
                                 " \t]\n" +
                                 " }"));
 
-        CreateDeploymentRequest request = new CreateDeploymentRequest()
-                .withApplicationName("my-lambda")
-                .withDeploymentGroupName("my-group")
-                .withRevision(revisionLocation);
-
-        codeDeploy.createDeployment(request);
+//        CreateDeploymentRequest request = new CreateDeploymentRequest()
+//                .withApplicationName("my-lambda")
+//                .withDeploymentGroupName("my-group")
+//                .withRevision(revisionLocation);
+//
+//        codeDeploy.createDeployment(request);
+        ListApplicationsRequest request = new ListApplicationsRequest();
+        System.out.println("Check out the result!");
+        System.out.println(codeDeploy.listApplications(request));
         codeDeploy.shutdown();
 
     }
